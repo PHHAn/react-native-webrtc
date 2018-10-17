@@ -7,13 +7,13 @@ import * as RTCUtil from './RTCUtil';
 import MediaStream from './MediaStream';
 import MediaStreamEvent from './MediaStreamEvent';
 import MediaStreamTrack from './MediaStreamTrack';
+import MediaStreamTrackEvent from './MediaStreamTrackEvent';
 import RTCDataChannel from './RTCDataChannel';
 import RTCDataChannelEvent from './RTCDataChannelEvent';
 import RTCSessionDescription from './RTCSessionDescription';
 import RTCIceCandidate from './RTCIceCandidate';
 import RTCIceCandidateEvent from './RTCIceCandidateEvent';
 import RTCEvent from './RTCEvent';
-import withLegacyCallbacks from './withLegacyCallbacks';
 
 const {WebRTCModule} = NativeModules;
 
@@ -49,16 +49,6 @@ const DEFAULT_SDP_CONSTRAINTS = {
     OfferToReceiveVideo: true,
   },
   optional: [],
-};
-
-/**
- * The default constraints of RTCPeerConnection's WebRTCModule.peerConnectionInit.
- */
-const DEFAULT_PC_CONSTRAINTS = {
-  mandatory: {},
-  optional: [
-    { DtlsSrtpKeyAgreement: true },
-  ],
 };
 
 const PEER_CONNECTION_EVENTS = [
@@ -110,18 +100,15 @@ export default class RTCPeerConnection extends EventTarget(PEER_CONNECTION_EVENT
   constructor(configuration) {
     super();
     this._peerConnectionId = nextPeerConnectionId++;
-    WebRTCModule.peerConnectionInit(
-        configuration,
-        DEFAULT_PC_CONSTRAINTS,
-        this._peerConnectionId);
+    WebRTCModule.peerConnectionInit(configuration, this._peerConnectionId);
     this._registerEvents();
     // Allow for legacy callback usage
-    this.createOffer = withLegacyCallbacks(this.createOffer.bind(this), true);
-    this.createAnswer = withLegacyCallbacks(this.createAnswer.bind(this), true);
-    this.setLocalDescription = withLegacyCallbacks(this.setLocalDescription.bind(this), false, 1, 2);
-    this.setRemoteDescription = withLegacyCallbacks(this.setRemoteDescription.bind(this));
-    this.addIceCandidate = withLegacyCallbacks(this.addIceCandidate.bind(this));
-    this.getStats = withLegacyCallbacks(this.getStats.bind(this));
+    this.createOffer = RTCUtil.promisify(this.createOffer.bind(this), true);
+    this.createAnswer = RTCUtil.promisify(this.createAnswer.bind(this), true);
+    this.setLocalDescription = RTCUtil.promisify(this.setLocalDescription.bind(this));
+    this.setRemoteDescription = RTCUtil.promisify(this.setRemoteDescription.bind(this));
+    this.addIceCandidate = RTCUtil.promisify(this.addIceCandidate.bind(this));
+    this.getStats = RTCUtil.promisify(this.getStats.bind(this));
   }
 
   addStream(stream: MediaStream) {
@@ -137,76 +124,96 @@ export default class RTCPeerConnection extends EventTarget(PEER_CONNECTION_EVENT
     }
   }
 
-  createOffer(options) {
-    return WebRTCModule.peerConnectionCreateOffer(
-      this._peerConnectionId,
-      RTCUtil.mergeMediaConstraints(options, DEFAULT_SDP_CONSTRAINTS)
-    ).then(data => new RTCSessionDescription(data));
+  createOffer(successCallback: ?Function, failureCallback: ?Function, options) {
+    WebRTCModule.peerConnectionCreateOffer(
+        this._peerConnectionId,
+        RTCUtil.mergeMediaConstraints(options, DEFAULT_SDP_CONSTRAINTS),
+        (successful, data) => {
+          if (successful) {
+            successCallback(new RTCSessionDescription(data));
+          } else {
+            failureCallback(data); // TODO: convert to NavigatorUserMediaError
+          }
+        });
   }
 
-  createAnswer(options) {
-    return WebRTCModule.peerConnectionCreateAnswer(
-      this._peerConnectionId,
-      RTCUtil.mergeMediaConstraints(options, DEFAULT_SDP_CONSTRAINTS)
-    ).then(data => new RTCSessionDescription(data));
+  createAnswer(successCallback: ?Function, failureCallback: ?Function, options) {
+    WebRTCModule.peerConnectionCreateAnswer(
+        this._peerConnectionId,
+        RTCUtil.mergeMediaConstraints(options, DEFAULT_SDP_CONSTRAINTS),
+        (successful, data) => {
+          if (successful) {
+            successCallback(new RTCSessionDescription(data));
+          } else {
+            failureCallback(data);
+          }
+        });
   }
 
   setConfiguration(configuration) {
     WebRTCModule.peerConnectionSetConfiguration(configuration, this._peerConnectionId);
   }
 
-  setLocalDescription(sessionDescription: RTCSessionDescription, constraints) {
-    return WebRTCModule.peerConnectionSetLocalDescription(
-      sessionDescription.toJSON(),
-      this._peerConnectionId
-    ).then(() => {
-      this.localDescription = sessionDescription;
-      return;
+  setLocalDescription(sessionDescription: RTCSessionDescription, success: ?Function, failure: ?Function) {
+    WebRTCModule.peerConnectionSetLocalDescription(sessionDescription.toJSON(), this._peerConnectionId, (successful, data) => {
+      if (successful) {
+        this.localDescription = sessionDescription;
+        success();
+      } else {
+        failure(data);
+      }
     });
   }
 
-  setRemoteDescription(sessionDescription: RTCSessionDescription) {
-    return WebRTCModule.peerConnectionSetRemoteDescription(
-      sessionDescription.toJSON(),
-      this._peerConnectionId
-    ).then(() => {
-      this.remoteDescription = sessionDescription;
-      return;
+  setRemoteDescription(sessionDescription: RTCSessionDescription, success: ?Function, failure: ?Function) {
+    WebRTCModule.peerConnectionSetRemoteDescription(sessionDescription.toJSON(), this._peerConnectionId, (successful, data) => {
+      if (successful) {
+        this.remoteDescription = sessionDescription;
+        success();
+      } else {
+        failure(data);
+      }
     });
   }
 
-  addIceCandidate(candidate) { // TODO: success, failure
-    return WebRTCModule.peerConnectionAddICECandidate(
-      candidate.toJSON(),
-      this._peerConnectionId
-    );
+  addIceCandidate(candidate, success, failure) { // TODO: success, failure
+    WebRTCModule.peerConnectionAddICECandidate(candidate.toJSON(), this._peerConnectionId, (successful) => {
+      if (successful) {
+        success && success();
+      } else {
+        failure && failure();
+      }
+    });
   }
 
-  getStats(track) {
+  getStats(track, success, failure) {
     if (WebRTCModule.peerConnectionGetStats) {
-      return WebRTCModule.peerConnectionGetStats(
+      WebRTCModule.peerConnectionGetStats(
         (track && track.id) || '',
-        this._peerConnectionId
-      ).then(stats => {
-        // On both Android and iOS it is faster to construct a single
-        // JSON string representing the array of StatsReports and have it
-        // pass through the React Native bridge rather than the array of
-        // StatsReports. While the implementations do try to be faster in
-        // general, the stress is on being faster to pass through the React
-        // Native bridge which is a bottleneck that tends to be visible in
-        // the UI when there is congestion involving UI-related passing.
-        if (Array.isArray(stats) && stats.length === 1 && typeof stats[0] === 'string') {
-          stats = stats[0]
-        }
-        if (typeof stats === 'string') {
-          try {
-            stats = JSON.parse(stats);
-          } catch (e) {
-            throw e;
+        this._peerConnectionId,
+        stats => {
+          if (success) {
+            // On both Android and iOS it is faster to construct a single
+            // JSON string representing the array of StatsReports and have it
+            // pass through the React Native bridge rather than the array of
+            // StatsReports. While the implementations do try to be faster in
+            // general, the stress is on being faster to pass through the React
+            // Native bridge which is a bottleneck that tends to be visible in
+            // the UI when there is congestion involving UI-related passing.
+            if (Array.isArray(stats) && stats.length === 1 && typeof stats[0] === 'string') {
+              stats = stats[0]
+            }
+            if (typeof stats === 'string') {
+              try {
+                stats = JSON.parse(stats);
+              } catch (e) {
+                failure(e);
+                return;
+              }
+            }
+            success(stats);
           }
-        }
-        return stats;
-      });
+        });
     } else {
       console.warn('RTCPeerConnection getStats not supported');
     }
@@ -222,6 +229,14 @@ export default class RTCPeerConnection extends EventTarget(PEER_CONNECTION_EVENT
 
   close() {
     WebRTCModule.peerConnectionClose(this._peerConnectionId);
+  }
+
+  _getTrack(streamReactTag, trackId): MediaStreamTrack {
+    const stream
+      = this._remoteStreams.find(
+          stream => stream.reactTag === streamReactTag);
+
+    return stream && stream._tracks.find(track => track.id === trackId);
   }
 
   _unregisterEvents(): void {
@@ -279,6 +294,17 @@ export default class RTCPeerConnection extends EventTarget(PEER_CONNECTION_EVENT
           }
         }
         this.dispatchEvent(new MediaStreamEvent('removestream', {stream}));
+      }),
+      DeviceEventEmitter.addListener('mediaStreamTrackMuteChanged', ev => {
+        if (ev.peerConnectionId !== this._peerConnectionId) {
+          return;
+        }
+        const track = this._getTrack(ev.streamReactTag, ev.trackId);
+        if (track) {
+          track.muted = ev.muted;
+          const eventName = ev.muted ? 'mute' : 'unmute';
+          track.dispatchEvent(new MediaStreamTrackEvent(eventName, {track}));
+        }
       }),
       DeviceEventEmitter.addListener('peerConnectionGotICECandidate', ev => {
         if (ev.id !== this._peerConnectionId) {
